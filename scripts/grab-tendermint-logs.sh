@@ -1,0 +1,1 @@
+sudo ansible-playbook -i ./.configs/hosts playbook.yml --tags "fetch_log"

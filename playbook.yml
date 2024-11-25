@@ -1,0 +1,159 @@
+- hosts: smartchaindb
+  become: true
+  vars:
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+    ansible_ssh_private_key_file: /path/to/your/private_key
+  tasks:
+    - name: Install jq
+      apt:
+        name: jq
+        state: present
+      tags:
+        - install_jq
+
+    - name: tendermint_init
+      shell: tendermint init
+      args:
+        chdir: /root
+      tags:
+        - tendermint_init
+
+    - name: Start SmartchainDB
+      shell: sudo docker-compose up -d bigchaindb
+      args:
+        chdir: /root/smartchaindb
+      tags:
+        - start_db
+
+    - name: Start Tendermint in the background
+      shell: nohup tendermint node > /root/tendermint.log 2>&1 &
+      args:
+        chdir: /root
+        executable: /bin/bash
+      tags:
+        - start_tendermint
+
+    - name: Stop BigchainDB
+      shell: sudo docker-compose down
+      args:
+        chdir: /root/smartchaindb
+      tags:
+        - stop_db
+
+    - name: Stop Tendermint Node
+      shell: |
+        PID=$(ps aux | grep 'tendermint node' | grep -v grep | awk '{print $2}')
+        if [ ! -z "$PID" ]; then
+          kill $PID
+          echo "Tendermint process $PID stopped."
+        else
+          echo "Tendermint process not found."
+        fi
+      register: tendermint_stop
+      changed_when: false
+      tags:
+        - tendermint_stop
+
+    - name: Display Tendermint Stop Result
+      debug:
+        msg: "{{ tendermint_stop.stdout }}"
+
+    - name: reset tendermint
+      shell: tendermint unsafe_reset_all
+      args:
+        chdir: /root
+        executable: /bin/bash
+      tags:
+        - reset_tendermint
+
+    - name: copy genesis.json file to node
+      copy:
+        src: ./.configs/genesis.json
+        dest: /root/.tendermint/config/genesis.json
+      tags:
+        - copy_genesis
+
+    - name: copy config.toml file to the node
+      copy:
+        src: ./.configs/config.toml
+        dest: /root/.tendermint/config/config.toml
+      tags:
+        - copy_config
+
+    - name: get tendermint-node public key
+      shell: jq -r '.pub_key.value' /root/.tendermint/config/priv_validator_key.json
+      register: tendermint_pub_key
+      tags:
+        - get_pub_key
+
+    - name: get tendermint-node id
+      shell: tendermint show_node_id
+      register: tendermint_node_id
+      tags:
+        - get_node_id
+
+    - name: get server ip
+      shell: hostname -I | awk '{print $1}'
+      register: server_ip
+      changed_when: false
+      tags:
+        - gather_ip
+
+    - name: collect data
+      set_fact:
+        tendermint_info: "{{ tendermint_info | default([]) + [ {'ip': server_ip.stdout.strip(), 'pub_key': tendermint_pub_key.stdout.strip(), 'node_id': tendermint_node_id.stdout.strip()} ] }}"
+      tags:
+        - collect_data
+
+    - name: Print gathered information
+      debug:
+        var: tendermint_info
+      tags:
+        - print_info
+
+    - name: Collect Tendermint info from all hosts into a single list
+      set_fact:
+        tendermint_info_list: "{{ tendermint_info_list | default([]) + [hostvars[item].tendermint_info] }}"
+      with_items: "{{ groups['smartchaindb'] }}"
+      run_once: true
+      tags:
+        - collect_data
+
+    - name: Write collected Tendermint info to JSON file
+      copy:
+        content: "{{ tendermint_info_list | to_nice_json }}"
+        dest: "./.configs/tendermint_info.json"
+      delegate_to: localhost
+      run_once: true
+      tags:
+        - dump_info
+
+    - name: Grab content of /root/tendermint.log
+      become: true
+      shell: cat /root/tendermint.log
+      register: tendermint_log_output
+      run_once: true
+      tags:
+        - fetch_log
+
+    - name: Display content of /root/tendermint.log
+      debug:
+        msg: "{{ tendermint_log_output.stdout }}"
+      run_once: true
+      tags:
+        - fetch_log
+
+- hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Consolidate node IDs into a single file
+      shell: cat ./.configs/node_ids/* > ./.configs/node_ids/all_node_ids.txt
+      tags:
+        - localhost
+        - consolidate_node_ids
+
+    - name: Consolidate private keys into a single file
+      shell: cat ./.configs/tendermint_pub_keys/* > ./.configs/tendermint_pub_keys/all_private_keys.txt
+      tags:
+        - localhost
+        - consolidate_keys
